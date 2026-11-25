@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "downskool",
-  "version": "0.2.0",
-  "description": "Detecta y descarga gratis los videos de las lecciones de Skool a las que tienes acceso.",
+  "version": "0.3.0",
+  "description": "Descarga gratis los videos de tus cursos de Skool en MP4, MP3, M4A o WAV.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -43,5 +43,8 @@
       ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
 }

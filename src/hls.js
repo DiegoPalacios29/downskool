@@ -41,6 +41,7 @@ function parseMaster(text, baseUrl) {
         bandwidth: Number(a.BANDWIDTH || 0),
         width: w,
         height: h,
+        codecs: a.CODECS || "",
         audioGroup: a.AUDIO || null,
       });
       i = j;
@@ -52,6 +53,24 @@ function parseMaster(text, baseUrl) {
     v.audioUri = group ? (group.find((g) => g.isDefault) || group[0]).uri : null;
   }
   return variants;
+}
+
+// Elige la variante a descargar.
+// - quality: "best" o la altura máxima en píxeles (1080, 720, 480, 360).
+// - audioOnly: solo hace falta el audio. Si viene aparte, basta cualquier variante
+//   (se baja solo su pista de audio); si va mezclado, la más liviana, porque el
+//   audio suele ser el mismo en todas las calidades.
+function pickVariant(variants, { quality = "best", audioOnly = false } = {}) {
+  if (!variants.length) return null;
+  if (audioOnly) {
+    return variants.find((v) => v.audioUri) ||
+      [...variants].sort((a, b) => a.bandwidth - b.bandwidth)[0];
+  }
+  // Las variantes sin resolución suelen ser solo audio: no sirven como video.
+  const video = variants.filter((v) => v.height > 0);
+  const pool = video.length ? video : variants;
+  if (quality === "best" || !Number(quality)) return pool[0];
+  return pool.find((v) => v.height <= Number(quality)) || pool[pool.length - 1];
 }
 
 function parseMedia(text, baseUrl) {
@@ -89,6 +108,6 @@ function parseMedia(text, baseUrl) {
   return { segments, init, encrypted, format };
 }
 
-const DownskoolHLS = { parseAttributes, parseMaster, parseMedia, isMaster };
+const DownskoolHLS = { parseAttributes, parseMaster, parseMedia, isMaster, pickVariant };
 if (typeof module !== "undefined") module.exports = DownskoolHLS;
 else self.DownskoolHLS = DownskoolHLS;

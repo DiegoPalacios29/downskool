@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const AUDIO_ONLY = new Set(["m4a", "mp3", "wav"]);
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -10,17 +11,46 @@ function cleanTitle(t) {
   return (t || "").replace(/\s*[|·-]\s*Skool\s*$/i, "").trim();
 }
 
+// ---------- opciones (se recuerdan entre usos) ----------
+
+const prefs = { format: "mp4", quality: "best" };
+
+async function loadPrefs() {
+  try {
+    const { prefs: stored } = await chrome.storage.local.get("prefs");
+    if (stored) Object.assign(prefs, stored);
+  } catch { /* valores por defecto */ }
+  $("format").value = prefs.format;
+  $("quality").value = prefs.quality;
+  syncQuality();
+}
+
+function syncQuality() {
+  // La calidad de imagen no aplica a los formatos de solo audio.
+  $("quality").disabled = AUDIO_ONLY.has($("format").value);
+}
+
+for (const id of ["format", "quality"]) {
+  $(id).addEventListener("change", () => {
+    prefs[id] = $(id).value;
+    syncQuality();
+    chrome.storage.local.set({ prefs }).catch(() => {});
+  });
+}
+
+// ---------- trabajos de descarga ----------
+
 // Por qué una lección no se puede descargar (o null si sí se puede).
 function blockedReason(lesson) {
   if (lesson.locked) return "Bloqueada: no tienes acceso a esta lección";
-  if (lesson.source === "YouTube") return "Los videos de YouTube no se pueden descargar";
   return null;
 }
 
 // Crea un trabajo de descarga y abre la página que lo procesa.
 async function startJob(tabId, course, items) {
   const jobId = `job:${Date.now()}`;
-  await chrome.storage.session.set({ [jobId]: { tabId, course, items } });
+  const job = { tabId, course, items, format: prefs.format, quality: prefs.quality };
+  await chrome.storage.session.set({ [jobId]: job });
   chrome.tabs.create({ url: chrome.runtime.getURL(`src/downloader.html?job=${encodeURIComponent(jobId)}`) });
   window.close();
 }
@@ -34,17 +64,26 @@ function renderCourse(tab, data) {
   const boxes = [];
   const ul = $("lessons");
   let lastSection = null;
-  let blocked = 0;
+  let locked = 0;
+  let youtube = 0;
+  let sectionNumber = 0;
+  let numberInSection = 0;
   lessons.forEach((lesson, i) => {
-    if (lesson.section && lesson.section !== lastSection) {
-      ul.append(el("li", { className: "section", textContent: lesson.section }));
+    if (lesson.section !== lastSection) {
+      if (lesson.section) ul.append(el("li", { className: "section", textContent: lesson.section }));
       lastSection = lesson.section;
+      sectionNumber++;
+      numberInSection = 0;
     }
+    // Posición dentro del módulo, para nombrar los archivos en orden.
+    lesson.sectionNumber = sectionNumber;
+    lesson.numberInSection = ++numberInSection;
     const reason = blockedReason(lesson);
     const box = el("input", { type: "checkbox", checked: !reason, disabled: !!reason });
     box.dataset.index = i;
-    if (reason) blocked++;
+    if (reason) locked++;
     else boxes.push(box);
+    if (!reason && lesson.source === "YouTube") youtube++;
     const tag = lesson.locked ? "🔒" : lesson.source || "";
     const label = el("label", { title: reason || "" },
       box,
@@ -53,9 +92,12 @@ function renderCourse(tab, data) {
     ul.append(el("li", { className: reason ? "disabled" : "" }, label));
   });
 
-  if (blocked) {
+  const notes = [];
+  if (youtube) notes.push(`${youtube} video(s) de YouTube: al terminar te damos el comando para bajarlos con yt-dlp (gratis).`);
+  if (locked) notes.push(`${locked} lección(es) bloqueada(s): no tienes acceso.`);
+  if (notes.length) {
     $("note").hidden = false;
-    $("note").textContent = `${blocked} lección(es) no se pueden descargar (YouTube o sin acceso).`;
+    $("note").textContent = notes.join(" ");
   }
 
   const update = () => {
@@ -77,7 +119,11 @@ function renderCourse(tab, data) {
       .map((b) => {
         const i = Number(b.dataset.index);
         const l = lessons[i];
-        return { kind: "lesson", lessonId: l.id, title: l.title, section: l.section, number: i + 1, source: l.source, videoLink: l.videoLink };
+        return {
+          kind: "lesson", lessonId: l.id, title: l.title, number: i + 1,
+          section: l.section, sectionNumber: l.sectionNumber, numberInSection: l.numberInSection,
+          source: l.source, videoLink: l.videoLink,
+        };
       });
     startJob(tab.id, course, items);
   });
@@ -103,6 +149,7 @@ function renderCurrent(tab, videos) {
 }
 
 async function main() {
+  await loadPrefs();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !/^https:\/\/([^/]+\.)?skool\.com\//.test(tab.url || "")) {
     $("message").textContent = "Abre un curso en skool.com para usar downskool.";

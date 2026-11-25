@@ -1,10 +1,11 @@
 {
   "name": "downskool",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Extensión de Chrome para descargar los videos de los cursos de Skool a los que tienes acceso.",
+  "description": "Extensión de Chrome para descargar los videos de tus cursos de Skool en MP4, MP3, M4A o WAV.",
   "scripts": {
     "test": "node --test test/*.test.js",
+    "vendor": "npm install --no-save mediabunny@1.65.2 @mediabunny/mp3-encoder@1.65.2 esbuild@0.25.10 && npx esbuild tools/mediabunny-entry.mjs --bundle --format=esm --minify --legal-comments=inline --target=chrome110 --outfile=src/vendor/mediabunny.bundle.mjs",
     "zip": "zip -r downskool.zip manifest.json icons src -x '*.DS_Store'"
   },
   "license": "MIT"

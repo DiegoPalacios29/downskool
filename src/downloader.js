@@ -1,34 +1,54 @@
 // downskool - procesa una cola de descargas.
 // Para cada elemento: encuentra la fuente del video (pidiéndole a la pestaña de
-// Skool que lea la lección), elige la mejor calidad, baja los fragmentos HLS en
-// paralelo, convierte MPEG-TS a MP4 con mux.js y guarda con chrome.downloads.
+// Skool que lea la lección), elige la calidad, baja los fragmentos HLS en
+// paralelo y entrega el archivo en el formato pedido (MP4, M4A, MP3 o WAV).
+// Lo que el navegador no puede bajar (YouTube) se junta en comandos de yt-dlp.
 
 const $ = (id) => document.getElementById(id);
 const status = (t) => ($("status").textContent = t);
 const detail = (t) => ($("detail").textContent = t);
 const CONCURRENCY = 6;
+const FORMAT_LABEL = { mp4: "MP4", m4a: "M4A", mp3: "MP3", wav: "WAV" };
+const AUDIO_ONLY = new Set(["m4a", "mp3", "wav"]);
+
+let converterModule = null;
+const loadConverter = () => (converterModule ||= import("./convert.mjs"));
 
 function safeName(name) {
   return (name || "video")
     .replace(/\s*[|·-]\s*Skool\s*$/i, "")
-    .replace(/[\\/:*?"<>|\u0000-\u001f~]+/g, " ")
+    .replace(/[\\/:*?"<>|\u0000-\u001f~%]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[.\s]+|[.\s]+$/g, "")
     .slice(0, 100) || "video";
 }
 
+const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// Ruta relativa (sin extensión) de una lección: Curso/01 - Módulo/01 - Lección.
+// Si el título ya empieza con su número ("04 — Demo"), no se repite.
+function lessonPath(item, folder) {
+  const sectionDir = item.section ? `${pad2(item.sectionNumber || 1)} - ${safeName(item.section)}/` : "";
+  const number = item.section ? item.numberInSection : item.number;
+  const ownNumber = /^\d{1,3}\s*[-—–.:)]/.test((item.title || "").trim());
+  return folder + sectionDir + (number && !ownNumber ? `${pad2(number)} - ` : "") + safeName(item.title);
+}
+
 // ---------- red ----------
+
+function fatalHttp(url, res) {
+  const err = new Error(`${new URL(url).hostname} rechazó la descarga (HTTP ${res.status}); el enlace pudo caducar`);
+  err.fatal = true;
+  return err;
+}
 
 async function fetchWithRetry(url, { range, as = "bytes", init = {} } = {}, tries = 4) {
   const headers = { ...(init.headers || {}), ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) };
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await fetch(url, { credentials: "omit", ...init, headers });
-      if ([401, 403, 410].includes(res.status)) {
-        const err = new Error(`${new URL(url).hostname} rechazó la descarga (HTTP ${res.status}); el enlace pudo caducar`);
-        err.fatal = true;
-        throw err;
-      }
+      if ([401, 403, 410].includes(res.status)) throw fatalHttp(url, res);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (as === "text") return await res.text();
       if (as === "json") return await res.json();
@@ -41,7 +61,28 @@ async function fetchWithRetry(url, { range, as = "bytes", init = {} } = {}, trie
   }
 }
 
+// Baja un archivo completo a memoria, con progreso (para convertirlo después).
+async function fetchBlob(url, onProgress) {
+  const res = await fetch(url, { credentials: "omit" });
+  if ([401, 403, 410].includes(res.status)) throw fatalHttp(url, res);
+  if (!res.ok) throw new Error(`no se pudo descargar ${new URL(url).hostname}: HTTP ${res.status}`);
+  const total = Number(res.headers.get("content-length")) || 0;
+  const reader = res.body.getReader();
+  const parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.byteLength;
+    onProgress(total ? got / total : 0, `${mb(got)}${total ? ` de ${mb(total)}` : ""}`);
+  }
+  return new Blob(parts);
+}
+
 // ---------- resolver la fuente de un video ----------
+
+const isYouTube = (link) => /youtube\.com|youtu\.be/i.test(link || "");
 
 async function fromLoom(link) {
   const id = (link.match(/loom\.com\/(?:share|embed)\/([a-f0-9]{16,})/i) || [])[1];
@@ -58,29 +99,37 @@ async function fromLoom(link) {
   throw new Error("Loom no entregó el video (puede ser privado)");
 }
 
-async function fromVimeo(link) {
+async function fromVimeo(link, job) {
   const id = (link.match(/vimeo\.com\/(?:video\/)?(\d+)/) || [])[1];
   if (!id) throw new Error("enlace de Vimeo no reconocido");
   const hash = (link.match(/[?&]h=([a-z0-9]+)/i) || link.match(/vimeo\.com\/\d+\/([a-z0-9]+)/i) || [])[1];
+  // La regla de background.js manda Referer de Skool: los videos restringidos al dominio lo exigen.
   const cfg = await fetchWithRetry(`https://player.vimeo.com/video/${id}/config${hash ? `?h=${hash}` : ""}`, { as: "json" }, 2);
-  const prog = (cfg.request?.files?.progressive || []).sort((a, b) => b.height - a.height)[0];
+  const files = (cfg.request && cfg.request.files) || {};
+  const hls = files.hls && files.hls.cdns && (files.hls.cdns[files.hls.default_cdn] || Object.values(files.hls.cdns)[0]);
+  const progressive = (files.progressive || []).filter((p) => p.url).sort((a, b) => b.height - a.height);
+  const max = job.quality === "best" ? Infinity : Number(job.quality);
+  const prog = progressive.find((p) => p.height <= max) || progressive[progressive.length - 1];
+
+  // Para solo audio conviene HLS (el audio viene aparte y pesa poco).
+  if (AUDIO_ONLY.has(job.format) && hls && hls.url) return { url: hls.url, type: "hls" };
   if (prog) return { url: prog.url, type: "mp4" };
-  const hls = cfg.request?.files?.hls;
-  const cdn = hls && (hls.cdns[hls.default_cdn] || Object.values(hls.cdns)[0]);
-  if (cdn) return { url: cdn.url, type: "hls" };
+  if (hls && hls.url) return { url: hls.url, type: "hls" };
   throw new Error("Vimeo no entregó el video (puede ser privado)");
 }
 
-async function fromLink(link) {
+async function fromLink(link, job) {
+  if (isYouTube(link)) return { type: "external", url: link, why: "YouTube" };
   if (/loom\.com/i.test(link)) return fromLoom(link);
-  if (/vimeo\.com/i.test(link)) return fromVimeo(link);
-  if (/youtube\.com|youtu\.be/i.test(link)) throw new Error("es un video de YouTube (downskool no descarga YouTube)");
-  throw new Error(`fuente no soportada: ${new URL(link).hostname}`);
+  if (/vimeo\.com/i.test(link)) return fromVimeo(link, job);
+  throw new Error(`fuente no soportada en el navegador: ${new URL(link).hostname}`);
 }
 
 async function resolveSource(job, item) {
   if (item.kind === "url") return { url: item.url, type: item.type };
-  if (item.source === "YouTube") throw new Error("es un video de YouTube (downskool no descarga YouTube)");
+  if (item.source === "YouTube" && isYouTube(item.videoLink)) {
+    return { type: "external", url: item.videoLink, why: "YouTube" };
+  }
 
   const res = await chrome.tabs.sendMessage(job.tabId, { type: "resolve-lesson", lessonId: item.lessonId })
     .catch(() => ({ ok: false, error: "la pestaña de Skool se cerró o se recargó; vuelve a abrir el curso e inténtalo de nuevo" }));
@@ -93,7 +142,14 @@ async function resolveSource(job, item) {
   if (mp4) return { url: mp4, type: "mp4" };
 
   const link = res.embeds[0] || item.videoLink;
-  if (link) return fromLink(link);
+  if (link) {
+    try {
+      return await fromLink(link, job);
+    } catch (err) {
+      err.link = link; // para ofrecerlo con yt-dlp
+      throw err;
+    }
+  }
   throw new Error(res.expectsNative
     ? "Skool no entregó el enlace del video. Abre la lección, dale play unos segundos y descárgala desde el panel"
     : "esta lección no tiene un video que downskool reconozca");
@@ -109,22 +165,50 @@ async function loadMediaPlaylist(url) {
   return pl;
 }
 
-async function downloadSegments(playlist, onProgress) {
+async function downloadSegments(playlist, onSegment) {
   const { segments } = playlist;
   const out = new Array(segments.length);
-  let next = 0, done = 0, bytes = 0;
+  let next = 0;
   async function worker() {
     while (next < segments.length) {
       const i = next++;
       out[i] = await fetchWithRetry(segments[i].uri, { range: segments[i].range });
-      bytes += out[i].byteLength;
-      onProgress(++done, segments.length, bytes);
+      onSegment(out[i].byteLength);
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   if (playlist.init) out.unshift(await fetchWithRetry(playlist.init.uri, { range: playlist.init.range }));
   return out;
 }
+
+// Devuelve los fragmentos de video y/o audio según el formato pedido.
+async function downloadHls(url, job, onProgress) {
+  const audioOnly = AUDIO_ONLY.has(job.format);
+  const text = await fetchWithRetry(url, { as: "text" });
+  let videoUrl = url, audioUrl = null, label = "";
+  if (DownskoolHLS.isMaster(text)) {
+    const variant = DownskoolHLS.pickVariant(DownskoolHLS.parseMaster(text, url), { quality: job.quality, audioOnly });
+    if (!variant) throw new Error("no hay calidades disponibles");
+    videoUrl = variant.uri;
+    audioUrl = variant.audioUri;
+    label = audioOnly ? "audio" : variant.height ? `${variant.height}p` : "";
+  }
+  // Si solo se quiere el audio y viene aparte, no hace falta bajar el video.
+  const video = audioOnly && audioUrl ? null : await loadMediaPlaylist(videoUrl);
+  const audio = audioUrl ? await loadMediaPlaylist(audioUrl) : null;
+  const total = (video ? video.segments.length : 0) + (audio ? audio.segments.length : 0);
+  let done = 0, bytes = 0;
+  const tick = (b) => {
+    done++;
+    bytes += b;
+    onProgress(done / total, `${label ? `${label} · ` : ""}${done}/${total} fragmentos · ${mb(bytes)}`);
+  };
+  const videoChunks = video ? await downloadSegments(video, tick) : null;
+  const audioChunks = audio ? await downloadSegments(audio, tick) : null;
+  return { videoChunks, audioChunks, container: (video || audio).format };
+}
+
+// ---------- conversión y guardado ----------
 
 function transmuxToMp4(chunks) {
   const transmuxer = new muxjs.mp4.Transmuxer({ keepOriginalTimestamps: false });
@@ -145,22 +229,28 @@ function transmuxToMp4(chunks) {
 // Nombre sin tildes ni símbolos, por si el sistema rechaza el original.
 function asciiPath(path) {
   return path.split("/").map((part) =>
-    part.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-      .replace(/[\u2013\u2014]/g, "-").replace(/[^\x20-\x7e]+/g, "").replace(/\s{2,}/g, " ")
+    part.normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .replace(/[–—]/g, "-").replace(/[^\x20-\x7e]+/g, "").replace(/\s{2,}/g, " ")
       .replace(/^[.\s-]+|[.\s-]+$/g, "") || "video").join("/");
 }
 
+const saved = []; // { id, relative } de lo descargado en este trabajo
+
 async function startDownload(url, filename) {
+  let id;
   try {
-    return await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
+    id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
   } catch (err) {
     if (!/filename/i.test(String(err && err.message))) throw err;
-    return chrome.downloads.download({ url, filename: asciiPath(filename), conflictAction: "uniquify" });
+    filename = asciiPath(filename);
+    id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
   }
+  saved.push({ id, relative: filename });
+  return id;
 }
 
-async function saveBlob(chunks, filename, type) {
-  const url = URL.createObjectURL(new Blob(chunks, { type }));
+async function saveBlob(parts, filename, type) {
+  const url = URL.createObjectURL(new Blob(parts, { type }));
   try {
     await waitForDownload(await startDownload(url, filename));
   } finally {
@@ -170,46 +260,140 @@ async function saveBlob(chunks, filename, type) {
 
 function waitForDownload(id) {
   return new Promise((resolve, reject) => {
+    const settle = (state, error) => {
+      if (state !== "complete" && state !== "interrupted") return;
+      chrome.downloads.onChanged.removeListener(listener);
+      if (state === "complete") resolve();
+      else reject(new Error(`descarga interrumpida${error ? ` (${error})` : ""}`));
+    };
     const listener = (delta) => {
-      if (delta.id !== id || !delta.state) return;
-      if (delta.state.current === "complete") { chrome.downloads.onChanged.removeListener(listener); resolve(); }
-      if (delta.state.current === "interrupted") { chrome.downloads.onChanged.removeListener(listener); reject(new Error("descarga interrumpida")); }
+      if (delta.id === id && delta.state) settle(delta.state.current, delta.error && delta.error.current);
     };
     chrome.downloads.onChanged.addListener(listener);
+    // Un archivo pequeño puede terminar antes de empezar a escuchar: mirar el estado actual.
+    chrome.downloads.search({ id })
+      .then(([item]) => item && settle(item.state, item.error))
+      .catch(() => {});
   });
 }
 
-async function downloadHls(url, base, onProgress) {
-  const text = await fetchWithRetry(url, { as: "text" });
-  let videoUrl = url, audioUrl = null, quality = "";
-  if (DownskoolHLS.isMaster(text)) {
-    const variants = DownskoolHLS.parseMaster(text, url);
-    if (!variants.length) throw new Error("no hay calidades disponibles");
-    ({ uri: videoUrl, audioUri: audioUrl } = variants[0]);
-    quality = variants[0].height ? `${variants[0].height}p` : "";
-  }
-  const video = await loadMediaPlaylist(videoUrl);
-  const audio = audioUrl ? await loadMediaPlaylist(audioUrl) : null;
-  const total = video.segments.length + (audio ? audio.segments.length : 0);
+// Convierte lo descargado al formato pedido y lo guarda. Devuelve una nota si
+// hubo que guardar algo sin convertir.
+async function finish(media, base, format, onProgress) {
+  const { videoChunks, audioChunks, container } = media;
 
-  const v = await downloadSegments(video, (d, _n, b) => onProgress(d / total, `${quality} · ${d}/${total} fragmentos · ${(b / 1048576).toFixed(1)} MB`));
-  const a = audio ? await downloadSegments(audio, (d) => onProgress((video.segments.length + d) / total, `audio · ${d}/${audio.segments.length}`)) : null;
-
-  onProgress(1, "uniendo el archivo…");
-  if (video.format === "fmp4") {
-    await saveBlob(v, `${base}.mp4`, "video/mp4");
-    if (a) await saveBlob(a, `${base} (audio).m4a`, "audio/mp4");
-    return;
-  }
-  if (!a) {
+  // MP4 desde un solo stream MPEG-TS (videos nativos de Skool): mux.js, el camino más probado.
+  if (format === "mp4" && videoChunks && !audioChunks && container === "ts") {
+    let parts = null;
     try {
-      return await saveBlob(transmuxToMp4(v), `${base}.mp4`, "video/mp4");
+      parts = transmuxToMp4(videoChunks);
     } catch (err) {
-      console.warn("downskool: no se pudo convertir a MP4, se guarda .ts", err);
+      console.warn("downskool: mux.js no pudo convertir, se usa mediabunny", err);
+    }
+    if (parts) {
+      await saveBlob(parts, `${base}.mp4`, "video/mp4");
+      return null;
     }
   }
-  await saveBlob(v, `${base}.ts`, "video/mp2t");
-  if (a) await saveBlob(a, `${base} (audio).ts`, "video/mp2t");
+
+  const label = format === "mp4" ? (audioChunks ? "uniendo video y audio" : "preparando el MP4") : `convirtiendo a ${FORMAT_LABEL[format]}`;
+  onProgress(0, `${label}…`);
+  const run = async (main) => {
+    const { convert } = await loadConverter();
+    return convert({
+      main,
+      audio: audioChunks ? new Blob(audioChunks) : null,
+      format,
+      onProgress: (p) => onProgress(p, `${label}… ${Math.round(p * 100)}%`),
+    });
+  };
+
+  let result = null;
+  let failure = null;
+  try {
+    result = await run(videoChunks ? new Blob(videoChunks) : null);
+  } catch (err) {
+    failure = err;
+    // Plan B para MPEG-TS: pasarlo antes a MP4 con mux.js y convertir eso.
+    if (videoChunks && container === "ts" && !/no tiene pista de audio/.test(err.message)) {
+      console.warn("downskool: reintento vía mux.js", err);
+      try {
+        result = await run(new Blob(transmuxToMp4(videoChunks)));
+      } catch (err2) {
+        failure = err2;
+      }
+    }
+  }
+  if (result) {
+    await saveBlob([result.blob], `${base}.${result.ext}`, result.blob.type);
+    return null;
+  }
+  if (format !== "mp4" || !videoChunks) throw failure;
+  // No perder la descarga: guardar las pistas tal cual.
+  await saveBlob(videoChunks, `${base}.${container === "ts" ? "ts" : "mp4"}`, container === "ts" ? "video/mp2t" : "video/mp4");
+  if (audioChunks) await saveBlob(audioChunks, `${base} (audio).${container === "ts" ? "ts" : "m4a"}`, "audio/mp4");
+  return `guardado sin unir/convertir (${failure.message})`;
+}
+
+async function processItem(src, base, job, onProgress) {
+  const audioOnly = AUDIO_ONLY.has(job.format);
+  if (src.type === "mp4" && !audioOnly) {
+    onProgress(0, "descarga directa");
+    await waitForDownload(await startDownload(src.url, `${base}.mp4`));
+    return null;
+  }
+  // Descarga 0–85 %, conversión 85–100 %.
+  const dl = (p, text) => onProgress(p * 0.85, text);
+  const media = src.type === "mp4"
+    ? { videoChunks: [await fetchBlob(src.url, dl)], audioChunks: null, container: "mp4" }
+    : await downloadHls(src.url, job, dl);
+  return finish(media, base, job.format, (p, text) => onProgress(0.85 + p * 0.15, text));
+}
+
+// ---------- yt-dlp ----------
+
+async function downloadsDir() {
+  for (const { id, relative } of [...saved].reverse()) {
+    const [item] = await chrome.downloads.search({ id }).catch(() => []);
+    const dir = item && DownskoolYtDlp.downloadsDirFrom(item.filename, relative);
+    if (dir) return dir;
+  }
+  return "~/Downloads";
+}
+
+function codeBlock(text) {
+  const wrap = el("div", "code");
+  const pre = el("pre", "", text);
+  const btn = el("button", "copy", "Copiar");
+  btn.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(text.replace(/\n/g, "\r\n"));
+    btn.textContent = "¡Copiado!";
+    setTimeout(() => (btn.textContent = "Copiar"), 1500);
+  });
+  wrap.append(pre, btn);
+  return wrap;
+}
+
+async function renderYtDlp(external, job) {
+  const dir = await downloadsDir();
+  const commands = external.map((x) => DownskoolYtDlp.ytdlpCommand({
+    url: x.url, output: x.output, format: job.format, quality: job.quality, dir,
+  }));
+  const box = $("ytdlp");
+  box.hidden = false;
+  box.append(
+    el("h2", "", `Descargar con yt-dlp (${external.length})`),
+    el("p", "muted", "Estos videos no se pueden bajar desde el navegador (YouTube no lo permite). " +
+      "yt-dlp es un programa gratuito que sí puede, y los guarda en la misma carpeta y formato."),
+  );
+  const list = el("ul", "small", "");
+  for (const x of external) list.append(el("li", "", `${x.title}${x.reason ? ` — ${x.reason}` : ""}`));
+  box.append(list,
+    el("h3", "", "1. Instálalo (solo la primera vez)"),
+    el("p", "muted small", "En el Símbolo del sistema. Después ciérralo y ábrelo de nuevo."),
+    codeBlock(DownskoolYtDlp.YTDLP_INSTALL.join("\n")),
+    el("h3", "", "2. Copia y pega esto en el Símbolo del sistema"),
+    codeBlock(commands.join("\n")));
 }
 
 // ---------- cola ----------
@@ -218,10 +402,13 @@ async function main() {
   const jobId = new URLSearchParams(location.search).get("job");
   const job = jobId && (await chrome.storage.session.get(jobId))[jobId];
   if (!job) throw new Error("No se encontró la lista de descargas. Vuelve a intentarlo desde el panel.");
+  job.format = FORMAT_LABEL[job.format] ? job.format : "mp4";
+  job.quality = job.quality || "best";
 
   const folder = job.course ? `${safeName(job.course)}/` : "";
-  const pad = String(job.items.length).length < 2 ? 2 : String(job.items.length).length;
   $("name").textContent = job.course || job.items[0].title;
+  $("options").textContent = `Formato: ${FORMAT_LABEL[job.format]}` +
+    (AUDIO_ONLY.has(job.format) ? " (solo audio)" : ` · Calidad: ${job.quality === "best" ? "máxima" : `${job.quality}p`}`);
   document.title = `downskool · ${$("name").textContent}`;
 
   const rows = job.items.map((item) => {
@@ -232,40 +419,54 @@ async function main() {
     return state;
   });
 
-  let ok = 0;
+  let ok = 0, failed = 0;
+  const external = [];
   for (let i = 0; i < job.items.length; i++) {
     const item = job.items[i];
     const row = rows[i];
-    const base = folder + (item.number ? `${String(item.number).padStart(pad, "0")} - ` : "") + safeName(item.title);
+    const base = lessonPath(item, folder);
     status(`(${i + 1}/${job.items.length}) ${item.title}`);
     row.textContent = "buscando video…";
     row.className = "muted";
     try {
       const src = await resolveSource(job, item);
-      row.textContent = "descargando…";
-      if (src.type === "mp4") {
-        detail("descarga directa");
-        await waitForDownload(await startDownload(src.url, `${base}.mp4`));
-      } else {
-        await downloadHls(src.url, base, (p, text) => {
-          $("bar").value = (i + p) / job.items.length;
-          detail(text);
-        });
+      if (src.type === "external") {
+        external.push({ title: item.title, url: src.url, output: base, reason: "" });
+        row.textContent = "→ con yt-dlp (abajo)";
+        row.className = "muted";
+        continue;
       }
-      row.textContent = "✓ listo";
+      row.textContent = "descargando…";
+      const note = await processItem(src, base, job, (p, text) => {
+        $("bar").value = (i + p) / job.items.length;
+        detail(text);
+      });
+      row.textContent = note ? `✓ ${note}` : "✓ listo";
       row.className = "ok";
       ok++;
     } catch (err) {
-      row.textContent = `✗ ${err.message}`;
+      // Si había un enlace externo (Vimeo, Loom...), yt-dlp puede intentarlo.
+      const link = err.link || item.videoLink;
+      if (link && /^https?:/.test(link)) {
+        external.push({ title: item.title, url: link, output: base, reason: err.message });
+        row.textContent = `✗ ${err.message} → prueba con yt-dlp (abajo)`;
+      } else {
+        row.textContent = `✗ ${err.message}`;
+        failed++;
+      }
       row.className = "err";
+    } finally {
+      $("bar").value = (i + 1) / job.items.length;
     }
-    $("bar").value = (i + 1) / job.items.length;
   }
 
   detail("");
-  status(ok === job.items.length
-    ? `¡Listo! ${ok} video(s) en tu carpeta de descargas${folder ? ` › ${folder}` : ""}.`
-    : `Terminado: ${ok} de ${job.items.length} descargados. Revisa los errores en la lista.`);
+  const parts = [`${ok} de ${job.items.length} descargado(s) en tu carpeta de descargas${folder ? ` › ${folder}` : ""}`];
+  if (external.length) parts.push(`${external.length} para bajar con yt-dlp (instrucciones abajo)`);
+  if (failed) parts.push(`${failed} con error (revisa la lista)`);
+  const allGood = failed === 0 && external.every((x) => !x.reason);
+  status(`${allGood ? "¡Listo! " : "Terminado: "}${parts.join(" · ")}.`);
+  if (external.length) await renderYtDlp(external, job);
   chrome.storage.session.remove(jobId);
 }
 

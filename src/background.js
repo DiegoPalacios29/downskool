@@ -19,7 +19,7 @@ chrome.declarativeNetRequest.updateSessionRules({
     },
     condition: {
       initiatorDomains: [chrome.runtime.id],
-      requestDomains: ["skool.com", "mux.com", "vimeo.com", "vimeocdn.com", "loom.com", "wistia.com", "wistia.net"],
+      requestDomains: ["skool.com", "mux.com", "vimeo.com", "vimeocdn.com", "akamaized.net", "loom.com", "wistia.com", "wistia.net"],
       resourceTypes: ["xmlhttprequest", "media", "other"],
     },
   }],

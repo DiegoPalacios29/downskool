@@ -8,14 +8,17 @@
 <body class="page">
   <main class="card">
     <h1 id="name">downskool</h1>
+    <p id="options" class="muted small"></p>
     <p id="status" class="muted">Preparando…</p>
     <progress id="bar" max="1" value="0"></progress>
     <p id="detail" class="muted small"></p>
     <ol id="queue"></ol>
     <p class="muted small">No cierres esta pestaña ni la pestaña de Skool hasta que termine.</p>
+    <section id="ytdlp" hidden></section>
   </main>
   <script src="vendor/mux.min.js"></script>
   <script src="hls.js"></script>
+  <script src="ytdlp.js"></script>
   <script src="downloader.js"></script>
 </body>
 </html>

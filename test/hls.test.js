@@ -50,3 +50,31 @@ file.mp4`, "https://a.com/x/p.m3u8");
   assert.deepEqual(pl.segments[0].range, { start: 700, end: 1699 });
   assert.deepEqual(pl.segments[1].range, { start: 1700, end: 2199 });
 });
+
+const { pickVariant } = require("../src/hls.js");
+
+const VARIANTS = parseMaster(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+v1080.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+v720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360
+v360.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=130000,CODECS="mp4a.40.2"
+audio.m3u8
+`, "https://a.com/master.m3u8");
+
+test("calidad: máxima, tope de altura y respaldo", () => {
+  assert.equal(pickVariant(VARIANTS).height, 1080);
+  assert.equal(pickVariant(VARIANTS, { quality: "720" }).height, 720);
+  assert.equal(pickVariant(VARIANTS, { quality: "480" }).height, 360);
+  // Ninguna es tan pequeña: la de video más baja, nunca la de solo audio.
+  assert.equal(pickVariant(VARIANTS, { quality: "240" }).height, 360);
+});
+
+test("solo audio: la variante más liviana, o la que trae el audio aparte", () => {
+  assert.equal(pickVariant(VARIANTS, { audioOnly: true }).uri, "https://a.com/audio.m3u8");
+  const split = parseMaster(MASTER, "https://stream.mux.com/ID.m3u8");
+  assert.equal(pickVariant(split, { audioOnly: true }).audioUri, "https://stream.mux.com/audio/es.m3u8");
+  assert.equal(pickVariant([], {}), null);
+});
