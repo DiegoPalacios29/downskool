@@ -24,11 +24,17 @@ async function fetchWithRetry(url, { range, as = "bytes", init = {} } = {}, trie
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await fetch(url, { credentials: "omit", ...init, headers });
+      if ([401, 403, 410].includes(res.status)) {
+        const err = new Error(`${new URL(url).hostname} rechazó la descarga (HTTP ${res.status}); el enlace pudo caducar`);
+        err.fatal = true;
+        throw err;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (as === "text") return await res.text();
       if (as === "json") return await res.json();
       return new Uint8Array(await res.arrayBuffer());
     } catch (err) {
+      if (err.fatal) throw err;
       if (attempt >= tries) throw new Error(`no se pudo descargar ${new URL(url).hostname}: ${err.message}`);
       await new Promise((r) => setTimeout(r, 600 * attempt));
     }
@@ -74,20 +80,23 @@ async function fromLink(link) {
 
 async function resolveSource(job, item) {
   if (item.kind === "url") return { url: item.url, type: item.type };
+  if (item.source === "YouTube") throw new Error("es un video de YouTube (downskool no descarga YouTube)");
 
   const res = await chrome.tabs.sendMessage(job.tabId, { type: "resolve-lesson", lessonId: item.lessonId })
-    .catch(() => ({ ok: false, error: "la pestaña de Skool se cerró o se recargó" }));
-  const urls = res.ok ? res.urls : [];
-  const hls = urls.find((u) => /\.m3u8/i.test(u));
+    .catch(() => ({ ok: false, error: "la pestaña de Skool se cerró o se recargó; vuelve a abrir el curso e inténtalo de nuevo" }));
+  if (!res.ok) throw new Error(res.error);
+  if (res.processing) throw new Error("Skool todavía está procesando este video; inténtalo más tarde");
+
+  const hls = res.urls.find((u) => /\.m3u8/i.test(u));
   if (hls) return { url: hls, type: "hls" };
-  const mp4 = urls.find((u) => /\.mp4/i.test(u));
+  const mp4 = res.urls.find((u) => /\.mp4/i.test(u));
   if (mp4) return { url: mp4, type: "mp4" };
 
-  const link = (res.ok && res.embeds[0]) || item.videoLink;
+  const link = res.embeds[0] || item.videoLink;
   if (link) return fromLink(link);
-  throw new Error(res.ok
-    ? "no se encontró el video en la lección. Ábrela, dale play y descárgala desde el panel"
-    : res.error);
+  throw new Error(res.expectsNative
+    ? "Skool no entregó el enlace del video. Abre la lección, dale play unos segundos y descárgala desde el panel"
+    : "esta lección no tiene un video que downskool reconozca");
 }
 
 // ---------- HLS ----------
@@ -133,10 +142,27 @@ function transmuxToMp4(chunks) {
   return [init, ...parts];
 }
 
+// Nombre sin tildes ni símbolos, por si el sistema rechaza el original.
+function asciiPath(path) {
+  return path.split("/").map((part) =>
+    part.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[\u2013\u2014]/g, "-").replace(/[^\x20-\x7e]+/g, "").replace(/\s{2,}/g, " ")
+      .replace(/^[.\s-]+|[.\s-]+$/g, "") || "video").join("/");
+}
+
+async function startDownload(url, filename) {
+  try {
+    return await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
+  } catch (err) {
+    if (!/filename/i.test(String(err && err.message))) throw err;
+    return chrome.downloads.download({ url, filename: asciiPath(filename), conflictAction: "uniquify" });
+  }
+}
+
 async function saveBlob(chunks, filename, type) {
   const url = URL.createObjectURL(new Blob(chunks, { type }));
   try {
-    await waitForDownload(await chrome.downloads.download({ url, filename, conflictAction: "uniquify" }));
+    await waitForDownload(await startDownload(url, filename));
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -219,7 +245,7 @@ async function main() {
       row.textContent = "descargando…";
       if (src.type === "mp4") {
         detail("descarga directa");
-        await waitForDownload(await chrome.downloads.download({ url: src.url, filename: `${base}.mp4`, conflictAction: "uniquify" }));
+        await waitForDownload(await startDownload(src.url, `${base}.mp4`));
       } else {
         await downloadHls(src.url, base, (p, text) => {
           $("bar").value = (i + p) / job.items.length;

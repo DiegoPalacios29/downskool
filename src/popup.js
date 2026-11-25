@@ -10,6 +10,13 @@ function cleanTitle(t) {
   return (t || "").replace(/\s*[|·-]\s*Skool\s*$/i, "").trim();
 }
 
+// Por qué una lección no se puede descargar (o null si sí se puede).
+function blockedReason(lesson) {
+  if (lesson.locked) return "Bloqueada: no tienes acceso a esta lección";
+  if (lesson.source === "YouTube") return "Los videos de YouTube no se pueden descargar";
+  return null;
+}
+
 // Crea un trabajo de descarga y abre la página que lo procesa.
 async function startJob(tabId, course, items) {
   const jobId = `job:${Date.now()}`;
@@ -19,7 +26,7 @@ async function startJob(tabId, course, items) {
 }
 
 function renderCourse(tab, data) {
-  if (!data || !data.lessons.length) return false;
+  if (!data || !data.lessons || !data.lessons.length) return false;
   const { course, lessons } = data;
   $("course").hidden = false;
   $("course-title").textContent = course || "Curso";
@@ -27,22 +34,36 @@ function renderCourse(tab, data) {
   const boxes = [];
   const ul = $("lessons");
   let lastSection = null;
+  let blocked = 0;
   lessons.forEach((lesson, i) => {
     if (lesson.section && lesson.section !== lastSection) {
       ul.append(el("li", { className: "section", textContent: lesson.section }));
       lastSection = lesson.section;
     }
-    const box = el("input", { type: "checkbox", checked: true });
+    const reason = blockedReason(lesson);
+    const box = el("input", { type: "checkbox", checked: !reason, disabled: !!reason });
     box.dataset.index = i;
-    boxes.push(box);
-    ul.append(el("li", {}, el("label", {}, box, el("span", { textContent: `${i + 1}. ${lesson.title}` }))));
+    if (reason) blocked++;
+    else boxes.push(box);
+    const tag = lesson.locked ? "🔒" : lesson.source || "";
+    const label = el("label", { title: reason || "" },
+      box,
+      el("span", { className: "lesson-title", textContent: `${i + 1}. ${lesson.title}` }),
+      tag ? el("span", { className: `tag${reason ? " off" : ""}`, textContent: tag }) : "");
+    ul.append(el("li", { className: reason ? "disabled" : "" }, label));
   });
+
+  if (blocked) {
+    $("note").hidden = false;
+    $("note").textContent = `${blocked} lección(es) no se pueden descargar (YouTube o sin acceso).`;
+  }
 
   const update = () => {
     const n = boxes.filter((b) => b.checked).length;
     $("count").textContent = `${n}/${boxes.length} videos`;
-    $("all").checked = n === boxes.length;
+    $("all").checked = n > 0 && n === boxes.length;
     $("all").indeterminate = n > 0 && n < boxes.length;
+    $("all").disabled = boxes.length === 0;
     $("download").disabled = n === 0;
   };
   boxes.forEach((b) => b.addEventListener("change", update));
@@ -56,7 +77,7 @@ function renderCourse(tab, data) {
       .map((b) => {
         const i = Number(b.dataset.index);
         const l = lessons[i];
-        return { kind: "lesson", lessonId: l.id, title: l.title, section: l.section, number: i + 1, videoLink: l.videoLink };
+        return { kind: "lesson", lessonId: l.id, title: l.title, section: l.section, number: i + 1, source: l.source, videoLink: l.videoLink };
       });
     startJob(tab.id, course, items);
   });

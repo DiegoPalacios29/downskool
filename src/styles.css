@@ -45,3 +45,10 @@ button:disabled { opacity: .45; cursor: default; }
 #queue li { padding: 3px 0; word-break: break-word; }
 .ok { color: #2e7d32; }
 .err { color: var(--error); }
+#lessons li label { align-items: center; }
+.lesson-title { flex: 1; }
+.tag { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.tag.off { background: var(--line); color: var(--muted); }
+#lessons li.disabled label { cursor: default; color: var(--muted); }
+#lessons li.disabled label:hover { background: none; }
+#note { margin: 8px 0 0; }

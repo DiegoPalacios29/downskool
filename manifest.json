@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "downskool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Detecta y descarga gratis los videos de las lecciones de Skool a las que tienes acceso.",
   "icons": {
     "16": "icons/icon16.png",
@@ -15,7 +15,13 @@
   "background": {
     "service_worker": "src/background.js"
   },
-  "permissions": ["webRequest", "downloads", "storage", "tabs"],
+  "permissions": [
+    "webRequest",
+    "declarativeNetRequestWithHostAccess",
+    "downloads",
+    "storage",
+    "tabs"
+  ],
   "host_permissions": [
     "https://*.skool.com/*",
     "https://*.mux.com/*",
@@ -29,8 +35,12 @@
   ],
   "content_scripts": [
     {
-      "matches": ["https://*.skool.com/*"],
-      "js": ["src/content.js"],
+      "matches": [
+        "https://*.skool.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

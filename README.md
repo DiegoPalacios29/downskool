@@ -18,12 +18,24 @@ videos de los cursos de [Skool](https://www.skool.com) **a los que ya tienes acc
 
 | Origen del video | Soporte |
 | --- | --- |
-| Videos nativos de Skool (Mux, HLS) | ✅ |
+| Videos nativos de Skool (`stream.video.skool.com`, HLS) | ✅ |
 | Loom | ✅ (si el video es público o tienes acceso) |
 | Vimeo | ⚠️ funciona si Vimeo entrega el archivo; los videos con restricción de dominio pueden fallar |
 | MP4 directos | ✅ |
-| YouTube | ❌ no se descarga (lo prohíben las condiciones de YouTube y de la Chrome Web Store) |
-| Streams cifrados / DRM | ❌ no se descargan |
+| YouTube | ❌ aparece desactivado: no se descarga (lo prohíben las condiciones de YouTube y de la Chrome Web Store) |
+| Lecciones sin acceso (🔒) o streams cifrados / DRM | ❌ |
+
+### Cómo encuentra los videos
+
+Skool es una app Next.js y cada página trae sus datos en `<script id="__NEXT_DATA__">`:
+
+- `props.pageProps.course` es el árbol del curso. Las lecciones tienen `unitType: "module"`;
+  `metadata.videoId` indica un video nativo y `metadata.videoLink` uno externo.
+- Al abrir una lección (`?md=<id>`), `props.pageProps.video` trae `playbackId` y
+  `playbackToken`, y el stream es
+  `https://stream.video.skool.com/<playbackId>.m3u8?token=<playbackToken>`.
+  El token caduca en unas horas, así que downskool pide cada lección justo antes de
+  descargarla.
 
 ## Instalación (modo desarrollador)
 

@@ -1,17 +1,26 @@
 // downskool - content script en *.skool.com
 //
-// 1. Lee los datos que Skool incrusta en la página (__NEXT_DATA__) para listar
-//    TODAS las lecciones del curso abierto (modo curso).
-// 2. A pedido del descargador, abre cada lección (misma sesión, mismas cookies)
-//    y busca la fuente de su video.
-// 3. Informa los videos de la lección actual al service worker (modo lección).
+// Skool es una app Next.js. Cada página trae sus datos en
+// <script id="__NEXT_DATA__">, en props.pageProps:
+//   - course: árbol del curso. Cada nodo es { course: {id, unitType, metadata}, children }.
+//     Las lecciones tienen unitType "module"; los módulos visibles son "set".
+//     metadata.videoId (o videoIds) indica un video nativo de Skool y
+//     metadata.videoLink / videoLinksData un video externo (YouTube, Loom...).
+//   - video: el video nativo de la lección abierta (?md=<id>), con
+//     { id, playbackId, playbackToken, status }. El stream es
+//     https://stream.video.skool.com/<playbackId>.m3u8?token=<playbackToken>
+//     y el token caduca en unas horas.
+//
+// Skool cambia de lección sin recargar, así que el __NEXT_DATA__ del DOM puede
+// ser de otra lección. Por eso siempre se pide una copia fresca de la página.
 
 (() => {
+  const STREAM = "https://stream.video.skool.com";
   const MEDIA_RE = /https:\/\/[^"'\s\\]+?\.(?:m3u8|mp4)(?:\?[^"'\s\\]*)?/gi;
-  const EMBED_RE = /(youtube\.com|youtu\.be|loom\.com\/(share|embed)|vimeo\.com|wistia)/i;
-  const VIDEO_KEYS = ["videoLink", "videoId", "videoLenMs", "videoThumbnail", "playbackId", "muxPlaybackId", "video"];
+  const LINK_RE = /https?:\/\/[^\s"'<>[\]\\]+/g;
+  const EMBED_RE = /(youtube\.com|youtu\.be|loom\.com|vimeo\.com|wistia\.(com|net))/i;
 
-  function readNextData(doc) {
+  function parseNextData(doc) {
     const node = doc.getElementById("__NEXT_DATA__");
     if (!node) return null;
     try {
@@ -21,131 +30,153 @@
     }
   }
 
-  function* walk(value, parents = []) {
+  async function fetchNextData(url) {
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error(`Skool respondió ${res.status}`);
+    const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+    const data = parseNextData(doc);
+    if (!data) throw new Error("Skool no devolvió los datos de la lección (¿se cerró la sesión?)");
+    return data;
+  }
+
+  function* walk(value) {
     if (!value || typeof value !== "object") return;
-    yield [value, parents];
-    const next = parents.concat([value]);
-    for (const child of Array.isArray(value) ? value : Object.values(value)) yield* walk(child, next);
+    yield value;
+    for (const child of Array.isArray(value) ? value : Object.values(value)) yield* walk(child);
   }
 
-  const titleOf = (o) => (o && (o.metadata?.title || o.title || o.name)) || "";
-  const hasVideoHint = (o) => {
-    const m = o.metadata || o;
-    return VIDEO_KEYS.some((k) => m[k] !== undefined && m[k] !== null && m[k] !== "");
-  };
+  const propsOf = (data) => (data && data.props && data.props.pageProps) || data || {};
 
-  // El módulo visible es la unidad más cercana con título que contiene a la
-  // lección (directamente, o como hermana dentro de un nodo {course, children}).
-  function sectionOf(id, parents) {
-    for (const p of [...parents].reverse()) {
-      if (!p || Array.isArray(p)) continue;
-      const unit = p.metadata?.title ? p : Object.values(p).find(
-        (v) => v && typeof v === "object" && !Array.isArray(v) && v.metadata?.title && v.id !== id);
-      if (unit && unit.id !== id && unit.unitType !== "module") {
-        return unit.unitType === "course" ? "" : unit.metadata.title;
-      }
-    }
-    return "";
+  function videoIdsOf(meta) {
+    const raw = meta.videoIds || meta.videoId || "";
+    const list = Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/);
+    return [...new Set(list.filter((x) => typeof x === "string" && x))];
   }
 
-  // Lista las lecciones del curso abierto, en orden, con el módulo al que
-  // pertenecen. Skool guarda el curso como un árbol de unidades con metadata.
-  function listLessons() {
-    const data = readNextData(document);
-    if (!data) return { course: document.title, lessons: [] };
-    const seen = new Map();
-    let course = "";
-
-    for (const [obj, parents] of walk(data.props || data)) {
-      const id = obj.id;
-      const meta = obj.metadata;
-      if (typeof id !== "string" || !meta || typeof meta !== "object" || !meta.title) continue;
-      const isLesson = obj.unitType === "module" || hasVideoHint(obj);
-      if (!isLesson) {
-        if (obj.unitType === "course" && !course) course = meta.title;
-        continue;
+  function linksOf(meta) {
+    const out = [];
+    const add = (value) => {
+      if (!value) return;
+      const text = typeof value === "string" ? value : JSON.stringify(value);
+      for (const m of text.matchAll(LINK_RE)) {
+        const url = m[0].replace(/[.,);']+$/, "");
+        if (EMBED_RE.test(url) && !out.includes(url)) out.push(url);
       }
-      if (seen.has(id)) continue;
-      seen.set(id, {
-        id,
-        title: meta.title,
-        section: sectionOf(id, parents),
-        hasVideo: hasVideoHint(obj),
-        videoLink: typeof meta.videoLink === "string" ? meta.videoLink : null,
-      });
-    }
-
-    let lessons = [...seen.values()];
-    if (lessons.some((l) => l.hasVideo)) lessons = lessons.filter((l) => l.hasVideo);
-    return { course: course || document.title.replace(/\s*[|·-]\s*Skool\s*$/i, ""), lessons };
-  }
-
-  // Extrae las fuentes de video de un documento de lección.
-  function mediaFrom(data, lessonId) {
-    const out = { urls: [], embeds: [] };
-    if (!data) return out;
-    // Si se puede, limitar la búsqueda a la unidad de esta lección.
-    let scope = data;
-    if (lessonId) {
-      for (const [obj] of walk(data)) {
-        if (obj.id === lessonId && obj.metadata) { scope = obj; break; }
-      }
-    }
-    const text = JSON.stringify(scope);
-    for (const m of text.matchAll(MEDIA_RE)) out.urls.push(m[0]);
-    for (const m of text.matchAll(/"(?:playbackId|playback_id|muxPlaybackId)"\s*:\s*"([A-Za-z0-9]{20,})"/g)) {
-      const token = (text.match(/"(?:playbackToken|muxToken|videoToken)"\s*:\s*"([^"]+)"/) || [])[1];
-      out.urls.push(`https://stream.mux.com/${m[1]}.m3u8${token ? `?token=${token}` : ""}`);
-    }
-    for (const m of text.matchAll(/"(?:videoLink|video_link|videoUrl)"\s*:\s*"([^"]+)"/g)) {
-      if (EMBED_RE.test(m[1])) out.embeds.push(m[1]);
-    }
-    out.urls = [...new Set(out.urls)];
-    out.embeds = [...new Set(out.embeds)];
+    };
+    add(meta.videoLink);
+    add(meta.videoUrl);
+    add(meta.videoLinksData);
     return out;
   }
 
-  async function resolveLesson(lessonId) {
-    if (lessonId === currentLessonId()) {
-      return mediaFrom(readNextData(document), lessonId);
+  function sourceOf(meta) {
+    if (videoIdsOf(meta).length) return "Skool";
+    const link = linksOf(meta)[0];
+    if (link) {
+      if (/youtu/i.test(link)) return "YouTube";
+      if (/loom/i.test(link)) return "Loom";
+      if (/vimeo/i.test(link)) return "Vimeo";
+      if (/wistia/i.test(link)) return "Wistia";
     }
-    const url = new URL(location.href);
-    url.searchParams.set("md", lessonId);
-    const html = await fetch(url.href, { credentials: "include" }).then((r) => r.text());
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    return mediaFrom(readNextData(doc), lessonId);
+    if (meta.videoLenMs || meta.videoThumbnail) return "Skool";
+    return null;
   }
 
-  const currentLessonId = () => new URL(location.href).searchParams.get("md");
+  // ---------- lista de lecciones del curso ----------
+
+  function listLessons(data) {
+    const props = propsOf(data);
+    const tree = props.course;
+    const lessons = [];
+    let course = "";
+
+    if (tree && typeof tree === "object" && tree.course) {
+      course = (tree.course.metadata && tree.course.metadata.title) || "";
+      const visit = (node, section) => {
+        if (!node || typeof node !== "object") return;
+        const unit = node.course || {};
+        const meta = unit.metadata || {};
+        let childSection = section;
+        if (unit.unitType === "module") {
+          lessons.push({
+            id: unit.id,
+            title: meta.title || "Lección",
+            section,
+            source: sourceOf(meta),
+            locked: meta.hasAccess === 0,
+            videoLink: linksOf(meta)[0] || null,
+          });
+        } else if (unit !== tree.course && meta.title) {
+          childSection = meta.title;
+        }
+        for (const child of node.children || []) visit(child, childSection);
+      };
+      visit(tree, "");
+    }
+
+    const withVideo = lessons.filter((l) => l.source);
+    return {
+      course: course || document.title.replace(/\s*[|·-]\s*Skool\s*$/i, ""),
+      lessons: withVideo.length ? withVideo : lessons,
+    };
+  }
+
+  // ---------- video de una lección ----------
+
+  function mediaFrom(data, lessonId) {
+    const props = propsOf(data);
+    let meta = {};
+    for (const obj of walk(props.course || props)) {
+      if (obj.id === lessonId && obj.metadata) {
+        meta = obj.metadata;
+        break;
+      }
+    }
+
+    const wanted = videoIdsOf(meta);
+    const players = [];
+    for (const obj of walk(props)) {
+      if (typeof obj.playbackId === "string" && obj.playbackId) players.push(obj);
+    }
+    let chosen = players.filter((p) => wanted.includes(p.id));
+    // pageProps.video es el video de la lección pedida; si trae id, debe coincidir.
+    const own = props.video;
+    if (!chosen.length && own && own.playbackId && (!wanted.length || !own.id || wanted.includes(own.id))) {
+      chosen = [own];
+    }
+
+    const urls = chosen.map((p) =>
+      `${STREAM}/${encodeURIComponent(p.playbackId)}.m3u8` +
+      (p.playbackToken ? `?token=${encodeURIComponent(p.playbackToken)}` : ""));
+    for (const m of JSON.stringify(meta).matchAll(MEDIA_RE)) urls.push(m[0]);
+
+    return {
+      urls: [...new Set(urls)],
+      embeds: linksOf(meta),
+      processing: chosen.some((p) => p.status && p.status !== "ready"),
+      expectsNative: wanted.length > 0,
+    };
+  }
+
+  function lessonUrl(lessonId) {
+    const url = new URL(location.href);
+    url.searchParams.set("md", lessonId);
+    return url.href;
+  }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "list-lessons") {
-      sendResponse(listLessons());
-    } else if (msg.type === "resolve-lesson") {
-      resolveLesson(msg.lessonId)
-        .then((r) => sendResponse({ ok: true, ...r }))
-        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+      fetchNextData(location.href)
+        .catch(() => parseNextData(document))
+        .then((data) => sendResponse(listLessons(data)))
+        .catch((err) => sendResponse({ course: "", lessons: [], error: String(err) }));
+      return true;
+    }
+    if (msg.type === "resolve-lesson") {
+      fetchNextData(lessonUrl(msg.lessonId))
+        .then((data) => sendResponse({ ok: true, ...mediaFrom(data, msg.lessonId) }))
+        .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
       return true;
     }
   });
-
-  // Modo lección: informa lo que se ve en la página actual.
-  function scanCurrent() {
-    const found = mediaFrom(readNextData(document), currentLessonId());
-    document.querySelectorAll("video[src], video source[src]").forEach((el) => {
-      const src = el.getAttribute("src");
-      if (src && /^https:/.test(src) && /\.(m3u8|mp4)/i.test(src)) found.urls.push(src);
-    });
-    document.querySelectorAll("iframe[src]").forEach((el) => {
-      if (EMBED_RE.test(el.src)) found.embeds.push(el.src);
-    });
-    chrome.runtime.sendMessage({ type: "page-videos", urls: found.urls, embeds: found.embeds }).catch(() => {});
-  }
-
-  scanCurrent();
-  let timer;
-  new MutationObserver(() => {
-    clearTimeout(timer);
-    timer = setTimeout(scanCurrent, 1500);
-  }).observe(document.body, { childList: true, subtree: true });
 })();
