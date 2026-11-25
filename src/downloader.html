@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>downskool · descargas</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="page">
+  <main class="card">
+    <h1 id="name">downskool</h1>
+    <p id="status" class="muted">Preparando…</p>
+    <progress id="bar" max="1" value="0"></progress>
+    <p id="detail" class="muted small"></p>
+    <ol id="queue"></ol>
+    <p class="muted small">No cierres esta pestaña ni la pestaña de Skool hasta que termine.</p>
+  </main>
+  <script src="vendor/mux.min.js"></script>
+  <script src="hls.js"></script>
+  <script src="downloader.js"></script>
+</body>
+</html>

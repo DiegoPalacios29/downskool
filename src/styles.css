@@ -1,0 +1,47 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1d1d27;
+  --muted: #6b6b7b;
+  --line: #e6e6ee;
+  --accent: #5b3df5;
+  --error: #c62828;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #17171f; --fg: #ececf3; --muted: #9a9aab; --line: #2c2c38; --accent: #8a74ff; --error: #ef6b6b; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+h1 { font-size: 16px; margin: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+.popup { width: 340px; padding: 12px; }
+.popup header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.popup footer { font-size: 12px; margin-top: 10px; }
+.item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.item strong { display: block; word-break: break-word; }
+button, .item a {
+  flex: none; border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer;
+  background: var(--accent); color: #fff; font: inherit; text-decoration: none;
+}
+
+.page { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
+.card { width: min(560px, 100%); border: 1px solid var(--line); border-radius: 12px; padding: 24px; }
+.card h1 { font-size: 20px; margin-bottom: 8px; word-break: break-word; }
+progress { width: 100%; height: 10px; accent-color: var(--accent); }
+.error #status { color: var(--error); }
+
+h2 { font-size: 14px; margin: 0; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+#lessons { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; border-top: 1px solid var(--line); }
+#lessons li label { display: flex; align-items: flex-start; gap: 8px; padding: 6px 2px; cursor: pointer; }
+#lessons li label:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+#lessons li.section { font-weight: 600; font-size: 12px; color: var(--muted); padding: 10px 2px 2px; text-transform: uppercase; letter-spacing: .03em; }
+#current { margin-top: 14px; }
+#queue { padding-left: 20px; max-height: 50vh; overflow-y: auto; }
+#queue li { padding: 3px 0; word-break: break-word; }
+.ok { color: #2e7d32; }
+.err { color: var(--error); }

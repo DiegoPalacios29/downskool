@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="popup">
+  <header>
+    <img src="../icons/icon48.png" alt="" width="24" height="24" />
+    <h1>downskool</h1>
+  </header>
+
+  <section id="course" hidden>
+    <div class="row">
+      <h2 id="course-title">Curso</h2>
+      <span id="count" class="muted"></span>
+    </div>
+    <div class="row toolbar">
+      <label><input type="checkbox" id="all" checked /> Todos</label>
+      <button id="download" class="primary">Descargar seleccionados</button>
+    </div>
+    <ul id="lessons"></ul>
+  </section>
+
+  <section id="current" hidden>
+    <h2>Video de esta lección</h2>
+    <div id="current-list"></div>
+  </section>
+
+  <p id="message" class="muted">Buscando videos…</p>
+  <script src="popup.js"></script>
+</body>
+</html>

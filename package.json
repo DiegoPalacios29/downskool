@@ -1,0 +1,11 @@
+{
+  "name": "downskool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Extensión de Chrome para descargar los videos de los cursos de Skool a los que tienes acceso.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "zip": "zip -r downskool.zip manifest.json icons src -x '*.DS_Store'"
+  },
+  "license": "MIT"
+}
