@@ -50,7 +50,7 @@ function syncDest() {
   hint.hidden = !dest.subdir;
   hint.textContent = !dest.subdir ? ""
     : dest.target
-      ? `Se guarda en ${dest.target} › <Curso>. La primera vez Chrome te pedirá elegir esa carpeta para darle permiso.`
+      ? `Se guarda en ${dest.target} › <Curso>. La primera vez el navegador te pedirá elegir esa carpeta para darle permiso.`
       : `Se guarda en Descargas › ${dest.subdir.split("/").join(" › ")} › <Curso>.`;
 }
 

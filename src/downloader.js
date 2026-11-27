@@ -307,7 +307,7 @@ async function openDestination(dest) {
   const show = (problem) => {
     $("grant-text").textContent = (problem ? `${problem} ` : "") + (handle
       ? `Confirma el permiso para guardar en ${dest.target}.`
-      : `Para guardar en ${dest.target}, pulsa el botón y elige esa carpeta. Chrome te pedirá permiso para guardar en ella; downskool la recuerda para las próximas veces.`);
+      : `Para guardar en ${dest.target}, pulsa el botón y elige esa carpeta. El navegador te pedirá permiso para guardar en ella; downskool la recuerda para las próximas veces.`);
     $("grant-ok").textContent = handle ? "Permitir guardar en la carpeta" : `Elegir la carpeta «${name}»`;
   };
   show("");
@@ -331,7 +331,7 @@ async function openDestination(dest) {
               await rememberFolder(key, picked);
               return resolve(picked);
             } else {
-              problem = "Chrome no dio permiso para escribir en esa carpeta.";
+              problem = "El navegador no dio permiso para escribir en esa carpeta.";
             }
           }
         } catch (err) {
