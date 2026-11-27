@@ -2,6 +2,7 @@
 // Para cada elemento: encuentra la fuente del video (pidiéndole a la pestaña de
 // Skool que lea la lección), elige la calidad, baja los fragmentos HLS en
 // paralelo y entrega el archivo en el formato pedido (MP4, M4A, MP3 o WAV).
+// Junto al video se guarda el texto de la lección (.md) si se pidió.
 // Lo que el navegador no puede bajar (YouTube) se junta en comandos de yt-dlp.
 
 const $ = (id) => document.getElementById(id);
@@ -125,15 +126,24 @@ async function fromLink(link, job) {
   throw new Error(`fuente no soportada en el navegador: ${new URL(link).hostname}`);
 }
 
-async function resolveSource(job, item) {
+// Pide a la pestaña de Skool los datos frescos de una lección: video y texto.
+async function fetchLesson(job, item) {
+  const res = await chrome.tabs.sendMessage(job.tabId, { type: "resolve-lesson", lessonId: item.lessonId })
+    .catch(() => ({ ok: false, error: "la pestaña de Skool se cerró o se recargó; vuelve a abrir el curso e inténtalo de nuevo" }));
+  if (!res.ok) throw new Error(res.error);
+  return res;
+}
+
+// `lesson` es la respuesta de fetchLesson (o `lessonError` si falló).
+// Devuelve null si la lección es de solo texto y no trae video.
+async function resolveSource(job, item, lesson, lessonError) {
   if (item.kind === "url") return { url: item.url, type: item.type };
   if (item.source === "YouTube" && isYouTube(item.videoLink)) {
     return { type: "external", url: item.videoLink, why: "YouTube" };
   }
 
-  const res = await chrome.tabs.sendMessage(job.tabId, { type: "resolve-lesson", lessonId: item.lessonId })
-    .catch(() => ({ ok: false, error: "la pestaña de Skool se cerró o se recargó; vuelve a abrir el curso e inténtalo de nuevo" }));
-  if (!res.ok) throw new Error(res.error);
+  if (!lesson) throw lessonError;
+  const res = lesson;
   if (res.processing) throw new Error("Skool todavía está procesando este video; inténtalo más tarde");
 
   const hls = res.urls.find((u) => /\.m3u8/i.test(u));
@@ -150,9 +160,19 @@ async function resolveSource(job, item) {
       throw err;
     }
   }
-  throw new Error(res.expectsNative
-    ? "Skool no entregó el enlace del video. Abre la lección, dale play unos segundos y descárgala desde el panel"
-    : "esta lección no tiene un video que downskool reconozca");
+  if (res.expectsNative) {
+    throw new Error("Skool no entregó el enlace del video. Abre la lección, dale play unos segundos y descárgala desde el panel");
+  }
+  if (item.textOnly) return null;
+  throw new Error("esta lección no tiene un video que downskool reconozca");
+}
+
+// Guarda el texto de la lección junto al video. Devuelve true si había texto.
+async function saveLessonText(item, lesson, base) {
+  const markdown = DownskoolText.lessonMarkdown({ title: item.title, ...(lesson.text || {}) });
+  if (!markdown) return false;
+  await saveBlob([markdown], `${base}.md`, "text/markdown;charset=utf-8");
+  return true;
 }
 
 // ---------- HLS ----------
@@ -236,6 +256,163 @@ function asciiPath(path) {
 
 const saved = []; // { id, relative } de lo descargado en este trabajo
 
+// ---------- carpeta elegida (fuera de Descargas) ----------
+// chrome.downloads solo guarda dentro de Descargas. Para otra carpeta, la persona
+// la elige una vez en el selector de Chrome y se escribe en ella con ese permiso.
+
+let destDir = null;  // FileSystemDirectoryHandle de la carpeta elegida, o null (Descargas)
+let destPath = "";   // su ruta tal como se escribió en el panel (para mostrarla y para yt-dlp)
+
+// Los permisos de carpeta se recuerdan en IndexedDB (ahí sí se pueden guardar).
+function folderStore(mode, run) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("downskool", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("folders");
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction("folders", mode);
+      const req = run(tx.objectStore("folders"));
+      tx.oncomplete = () => resolve(req.result);
+      tx.onerror = tx.onabort = () => reject(tx.error);
+    };
+  });
+}
+const loadFolder = (key) => folderStore("readonly", (store) => store.get(key)).catch(() => null);
+const rememberFolder = (key, handle) => folderStore("readwrite", (store) => store.put(handle, key)).catch(() => {});
+
+// La carpeta sigue existiendo y se puede escribir en ella sin preguntar.
+async function folderReady(handle) {
+  try {
+    if ((await handle.queryPermission({ mode: "readwrite" })) !== "granted") return false;
+    await handle.keys().next();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Consigue la carpeta de destino cuando está fuera de Descargas. Si hace falta,
+ * espera a que la persona la elija o confirme el permiso (Chrome exige un clic).
+ * @returns {Promise<FileSystemDirectoryHandle|null>} null = usar Descargas.
+ */
+async function openDestination(dest) {
+  if (!dest.target || !window.showDirectoryPicker) return null;
+  const key = DownskoolDest.destKey(dest.target);
+  const name = dest.target.split(/[\\/]/).pop();
+  let handle = await loadFolder(key);
+  if (handle && (await folderReady(handle))) return handle;
+
+  status("Falta un paso para empezar");
+  const show = (problem) => {
+    $("grant-text").textContent = (problem ? `${problem} ` : "") + (handle
+      ? `Confirma el permiso para guardar en ${dest.target}.`
+      : `Para guardar en ${dest.target}, pulsa el botón y elige esa carpeta. Chrome te pedirá permiso para guardar en ella; downskool la recuerda para las próximas veces.`);
+    $("grant-ok").textContent = handle ? "Permitir guardar en la carpeta" : `Elegir la carpeta «${name}»`;
+  };
+  show("");
+  $("grant").hidden = false;
+  try {
+    return await new Promise((resolve) => {
+      $("grant-skip").onclick = () => resolve(null);
+      $("grant-ok").onclick = async () => {
+        let problem = "";
+        try {
+          if (handle) {
+            const state = await handle.requestPermission({ mode: "readwrite" });
+            if (state === "granted" && (await folderReady(handle))) return resolve(handle);
+            handle = null; // sin permiso, o la carpeta ya no existe: elegirla de nuevo
+          } else {
+            const picked = await window.showDirectoryPicker({ id: "downskool", mode: "readwrite", startIn: "documents" });
+            // La ruta del panel es la que se muestra y la que usa yt-dlp: deben coincidir.
+            if (picked.name.toLowerCase() !== name.toLowerCase()) {
+              problem = `Elegiste «${picked.name}», pero la ruta del panel termina en «${name}». Elige «${name}» o cambia la ruta en el panel.`;
+            } else if (await folderReady(picked)) {
+              await rememberFolder(key, picked);
+              return resolve(picked);
+            } else {
+              problem = "Chrome no dio permiso para escribir en esa carpeta.";
+            }
+          }
+        } catch (err) {
+          // AbortError: se cerró el selector sin elegir nada.
+          if (err.name !== "AbortError") problem = `No se pudo usar la carpeta (${err.message}).`;
+        }
+        show(problem);
+      };
+    });
+  } finally {
+    $("grant").hidden = true;
+  }
+}
+
+// Crea el archivo (y sus carpetas) sin pisar uno que ya exista: "nombre (1).ext".
+async function createFile(relative) {
+  const parts = relative.split("/");
+  const name = parts.pop();
+  let dir = destDir;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true });
+  const dot = name.lastIndexOf(".");
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  for (let n = 0; ; n++) {
+    const candidate = n ? `${stem} (${n})${ext}` : name;
+    const exists = await dir.getFileHandle(candidate).then(() => true, (err) => {
+      if (err.name === "NotFoundError") return false;
+      throw err;
+    });
+    if (!exists) return { dir, name: candidate, file: await dir.getFileHandle(candidate, { create: true }) };
+  }
+}
+
+// Escribe un Blob o un ReadableStream en la carpeta elegida.
+async function writeToFolder(data, relative) {
+  let target;
+  try {
+    target = await createFile(relative);
+  } catch (err) {
+    if (err.name !== "TypeError") throw err; // TypeError: nombre no permitido
+    target = await createFile(asciiPath(relative));
+  }
+  try {
+    const writable = await target.file.createWritable();
+    if (data instanceof Blob) {
+      await writable.write(data);
+      await writable.close();
+    } else {
+      await data.pipeTo(writable);
+    }
+  } catch (err) {
+    await target.dir.removeEntry(target.name).catch(() => {}); // no dejar un archivo vacío
+    throw new Error(`no se pudo escribir en la carpeta (${err.message})`);
+  }
+}
+
+// Baja un archivo directo a la carpeta elegida sin pasarlo por memoria.
+// Devuelve false si el servidor no deja leerlo desde la extensión.
+async function streamToFolder(url, relative, onProgress) {
+  let res;
+  try {
+    res = await fetch(url, { credentials: "omit" });
+  } catch {
+    return false;
+  }
+  if ([401, 403, 410].includes(res.status)) throw fatalHttp(url, res);
+  if (!res.ok || !res.body) return false;
+  const total = Number(res.headers.get("content-length")) || 0;
+  let got = 0;
+  const meter = new TransformStream({
+    transform(chunk, controller) {
+      got += chunk.byteLength;
+      onProgress(total ? got / total : 0, `${mb(got)}${total ? ` de ${mb(total)}` : ""}`);
+      controller.enqueue(chunk);
+    },
+  });
+  await writeToFolder(res.body.pipeThrough(meter), relative);
+  return true;
+}
+
+// ---------- guardar ----------
+
 async function startDownload(url, filename) {
   let id;
   try {
@@ -250,6 +427,7 @@ async function startDownload(url, filename) {
 }
 
 async function saveBlob(parts, filename, type) {
+  if (destDir) return writeToFolder(new Blob(parts, { type }), filename);
   const url = URL.createObjectURL(new Blob(parts, { type }));
   try {
     await waitForDownload(await startDownload(url, filename));
@@ -339,8 +517,9 @@ async function processItem(src, base, job, onProgress) {
   const audioOnly = AUDIO_ONLY.has(job.format);
   if (src.type === "mp4" && !audioOnly) {
     onProgress(0, "descarga directa");
+    if (destDir && (await streamToFolder(src.url, `${base}.mp4`, onProgress))) return null;
     await waitForDownload(await startDownload(src.url, `${base}.mp4`));
-    return null;
+    return destDir ? "guardado en tu carpeta de Descargas (el servidor del video no dejó escribirlo en la carpeta elegida)" : null;
   }
   // Descarga 0–85 %, conversión 85–100 %.
   const dl = (p, text) => onProgress(p * 0.85, text);
@@ -353,6 +532,7 @@ async function processItem(src, base, job, onProgress) {
 // ---------- yt-dlp ----------
 
 async function downloadsDir() {
+  if (destDir) return destPath;
   for (const { id, relative } of [...saved].reverse()) {
     const [item] = await chrome.downloads.search({ id }).catch(() => []);
     const dir = item && DownskoolYtDlp.downloadsDirFrom(item.filename, relative);
@@ -405,10 +585,10 @@ async function main() {
   job.format = FORMAT_LABEL[job.format] ? job.format : "mp4";
   job.quality = job.quality || "best";
 
-  const folder = job.course ? `${safeName(job.course)}/` : "";
   $("name").textContent = job.course || job.items[0].title;
   $("options").textContent = `Formato: ${FORMAT_LABEL[job.format]}` +
-    (AUDIO_ONLY.has(job.format) ? " (solo audio)" : ` · Calidad: ${job.quality === "best" ? "máxima" : `${job.quality}p`}`);
+    (AUDIO_ONLY.has(job.format) ? " (solo audio)" : ` · Calidad: ${job.quality === "best" ? "máxima" : `${job.quality}p`}`) +
+    (job.text ? " · Con el texto de cada lección" : "");
   document.title = `downskool · ${$("name").textContent}`;
 
   const rows = job.items.map((item) => {
@@ -419,7 +599,15 @@ async function main() {
     return state;
   });
 
-  let ok = 0, failed = 0;
+  // Destino: la carpeta elegida, o [subcarpeta/] dentro de Descargas. Luego, Curso/.
+  const dest = DownskoolDest.parseDest(job.dest);
+  destDir = await openDestination(dest);
+  destPath = destDir ? dest.target : "";
+  const folder = [destDir ? "" : dest.subdir, job.course && safeName(job.course)]
+    .filter(Boolean).map((part) => `${part}/`).join("");
+  const place = destDir ? destPath : "tu carpeta de descargas";
+
+  let ok = 0, failed = 0, empty = 0;
   const external = [];
   for (let i = 0; i < job.items.length; i++) {
     const item = job.items[i];
@@ -428,11 +616,37 @@ async function main() {
     status(`(${i + 1}/${job.items.length}) ${item.title}`);
     row.textContent = "buscando video…";
     row.className = "muted";
+    // Texto de la lección: `texted` se añade al estado de la fila.
+    let lesson = null, lessonError = null, texted = "";
+    if (item.lessonId) {
+      try {
+        lesson = await fetchLesson(job, item);
+      } catch (err) {
+        lessonError = err;
+      }
+    }
+    if (job.text && item.lessonId) {
+      try {
+        if (!lesson) throw lessonError;
+        if (await saveLessonText(item, lesson, base)) texted = " · texto guardado";
+      } catch (err) {
+        texted = ` · no se pudo guardar el texto (${err.message})`;
+      }
+    }
     try {
-      const src = await resolveSource(job, item);
+      const src = await resolveSource(job, item, lesson, lessonError);
+      if (!src) {
+        // Lección de solo texto.
+        const done = texted === " · texto guardado";
+        row.textContent = done ? "✓ texto guardado (no tiene video)" : `— sin video${texted || " ni texto"}`;
+        row.className = done ? "ok" : "muted";
+        if (done) ok++;
+        else empty++;
+        continue;
+      }
       if (src.type === "external") {
         external.push({ title: item.title, url: src.url, output: base, reason: "" });
-        row.textContent = "→ con yt-dlp (abajo)";
+        row.textContent = `→ con yt-dlp (abajo)${texted}`;
         row.className = "muted";
         continue;
       }
@@ -441,7 +655,7 @@ async function main() {
         $("bar").value = (i + p) / job.items.length;
         detail(text);
       });
-      row.textContent = note ? `✓ ${note}` : "✓ listo";
+      row.textContent = `✓ ${note || "listo"}${texted}`;
       row.className = "ok";
       ok++;
     } catch (err) {
@@ -449,9 +663,9 @@ async function main() {
       const link = err.link || item.videoLink;
       if (link && /^https?:/.test(link)) {
         external.push({ title: item.title, url: link, output: base, reason: err.message });
-        row.textContent = `✗ ${err.message} → prueba con yt-dlp (abajo)`;
+        row.textContent = `✗ ${err.message} → prueba con yt-dlp (abajo)${texted}`;
       } else {
-        row.textContent = `✗ ${err.message}`;
+        row.textContent = `✗ ${err.message}${texted}`;
         failed++;
       }
       row.className = "err";
@@ -461,8 +675,9 @@ async function main() {
   }
 
   detail("");
-  const parts = [`${ok} de ${job.items.length} descargado(s) en tu carpeta de descargas${folder ? ` › ${folder}` : ""}`];
+  const parts = [`${ok} de ${job.items.length} descargado(s) en ${place}${folder ? ` › ${folder}` : ""}`];
   if (external.length) parts.push(`${external.length} para bajar con yt-dlp (instrucciones abajo)`);
+  if (empty) parts.push(`${empty} sin video ni texto`);
   if (failed) parts.push(`${failed} con error (revisa la lista)`);
   const allGood = failed === 0 && external.every((x) => !x.reason);
   status(`${allGood ? "¡Listo! " : "Terminado: "}${parts.join(" · ")}.`);

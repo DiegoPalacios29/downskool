@@ -10,6 +10,13 @@
     <h1 id="name">downskool</h1>
     <p id="options" class="muted small"></p>
     <p id="status" class="muted">Preparando…</p>
+    <section id="grant" hidden>
+      <p id="grant-text"></p>
+      <div class="row">
+        <button id="grant-ok"></button>
+        <button id="grant-skip" class="plain">Guardar en Descargas esta vez</button>
+      </div>
+    </section>
     <progress id="bar" max="1" value="0"></progress>
     <p id="detail" class="muted small"></p>
     <ol id="queue"></ol>
@@ -19,6 +26,8 @@
   <script src="vendor/mux.min.js"></script>
   <script src="hls.js"></script>
   <script src="ytdlp.js"></script>
+  <script src="dest.js"></script>
+  <script src="lessontext.js"></script>
   <script src="downloader.js"></script>
 </body>
 </html>

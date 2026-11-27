@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "downskool",
-  "version": "0.3.0",
-  "description": "Descarga gratis los videos de tus cursos de Skool en MP4, MP3, M4A o WAV.",
+  "version": "0.4.0",
+  "description": "Descarga gratis los videos de tus cursos de Skool en MP4, MP3, M4A o WAV, con el texto de cada lección.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

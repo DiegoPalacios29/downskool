@@ -62,6 +62,20 @@ select {
 }
 select:disabled { opacity: .5; }
 
+/* Carpeta de destino y texto de las lecciones */
+.extra { margin-bottom: 12px; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+input[type="text"] {
+  font: inherit; font-size: 13px; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%;
+}
+#dest-hint { margin: 6px 0 0; word-break: break-word; }
+#grant { margin: 12px 0; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; }
+#grant p { margin: 0 0 10px; word-break: break-word; }
+#grant .row { justify-content: flex-start; margin: 0; flex-wrap: wrap; }
+button.plain { background: none; color: var(--accent); border: 1px solid var(--line); }
+.check { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
+
 /* Panel de yt-dlp */
 #ytdlp { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 #ytdlp h2 { font-size: 16px; margin-bottom: 6px; }

@@ -13,7 +13,7 @@ function cleanTitle(t) {
 
 // ---------- opciones (se recuerdan entre usos) ----------
 
-const prefs = { format: "mp4", quality: "best" };
+const prefs = { format: "mp4", quality: "best", dest: "", text: true };
 
 async function loadPrefs() {
   try {
@@ -22,8 +22,13 @@ async function loadPrefs() {
   } catch { /* valores por defecto */ }
   $("format").value = prefs.format;
   $("quality").value = prefs.quality;
+  $("dest").value = prefs.dest || "";
+  $("text").checked = prefs.text !== false;
   syncQuality();
+  syncDest();
 }
+
+const savePrefs = () => chrome.storage.local.set({ prefs }).catch(() => {});
 
 function syncQuality() {
   // La calidad de imagen no aplica a los formatos de solo audio.
@@ -34,9 +39,30 @@ for (const id of ["format", "quality"]) {
   $(id).addEventListener("change", () => {
     prefs[id] = $(id).value;
     syncQuality();
-    chrome.storage.local.set({ prefs }).catch(() => {});
+    savePrefs();
   });
 }
+
+// Explica dónde se va a guardar.
+function syncDest() {
+  const dest = DownskoolDest.parseDest($("dest").value);
+  const hint = $("dest-hint");
+  hint.hidden = !dest.subdir;
+  hint.textContent = !dest.subdir ? ""
+    : dest.target
+      ? `Se guarda en ${dest.target} › <Curso>. La primera vez Chrome te pedirá elegir esa carpeta para darle permiso.`
+      : `Se guarda en Descargas › ${dest.subdir.split("/").join(" › ")} › <Curso>.`;
+}
+
+$("dest").addEventListener("input", () => {
+  prefs.dest = $("dest").value;
+  syncDest();
+  savePrefs();
+});
+$("text").addEventListener("change", () => {
+  prefs.text = $("text").checked;
+  savePrefs();
+});
 
 // ---------- trabajos de descarga ----------
 
@@ -49,7 +75,7 @@ function blockedReason(lesson) {
 // Crea un trabajo de descarga y abre la página que lo procesa.
 async function startJob(tabId, course, items) {
   const jobId = `job:${Date.now()}`;
-  const job = { tabId, course, items, format: prefs.format, quality: prefs.quality };
+  const job = { tabId, course, items, format: prefs.format, quality: prefs.quality, dest: prefs.dest, text: prefs.text };
   await chrome.storage.session.set({ [jobId]: job });
   chrome.tabs.create({ url: chrome.runtime.getURL(`src/downloader.html?job=${encodeURIComponent(jobId)}`) });
   window.close();
@@ -61,7 +87,11 @@ function renderCourse(tab, data) {
   $("course").hidden = false;
   $("course-title").textContent = course || "Curso";
 
+  // Si Skool marca videos en alguna lección, las que no lo tienen son de solo texto.
+  const anyVideo = lessons.some((l) => l.source);
+  const NO_VIDEO = "No tiene video: marca «Guardar también el texto» para bajar su texto";
   const boxes = [];
+  const textBoxes = [];
   const ul = $("lessons");
   let lastSection = null;
   let locked = 0;
@@ -79,12 +109,14 @@ function renderCourse(tab, data) {
     lesson.sectionNumber = sectionNumber;
     lesson.numberInSection = ++numberInSection;
     const reason = blockedReason(lesson);
+    lesson.textOnly = anyVideo && !lesson.source;
     const box = el("input", { type: "checkbox", checked: !reason, disabled: !!reason });
     box.dataset.index = i;
     if (reason) locked++;
     else boxes.push(box);
+    if (!reason && lesson.textOnly) textBoxes.push(box);
     if (!reason && lesson.source === "YouTube") youtube++;
-    const tag = lesson.locked ? "🔒" : lesson.source || "";
+    const tag = lesson.locked ? "🔒" : lesson.source || (lesson.textOnly ? "Texto" : "");
     const label = el("label", { title: reason || "" },
       box,
       el("span", { className: "lesson-title", textContent: `${i + 1}. ${lesson.title}` }),
@@ -101,33 +133,48 @@ function renderCourse(tab, data) {
   }
 
   const update = () => {
-    const n = boxes.filter((b) => b.checked).length;
-    $("count").textContent = `${n}/${boxes.length} videos`;
-    $("all").checked = n > 0 && n === boxes.length;
-    $("all").indeterminate = n > 0 && n < boxes.length;
-    $("all").disabled = boxes.length === 0;
+    const usable = boxes.filter((b) => !b.disabled);
+    const n = usable.filter((b) => b.checked).length;
+    $("count").textContent = `${n}/${usable.length} lecciones`;
+    $("all").checked = n > 0 && n === usable.length;
+    $("all").indeterminate = n > 0 && n < usable.length;
+    $("all").disabled = usable.length === 0;
     $("download").disabled = n === 0;
   };
+  // Las lecciones de solo texto solo se pueden elegir si se va a guardar el texto.
+  const syncTextOnly = () => {
+    const on = $("text").checked;
+    for (const box of textBoxes) {
+      box.disabled = !on;
+      box.checked = on;
+      const label = box.closest("label");
+      label.title = on ? "" : NO_VIDEO;
+      label.parentElement.className = on ? "" : "disabled";
+      label.querySelector(".tag").classList.toggle("off", !on);
+    }
+    update();
+  };
+  $("text").addEventListener("change", syncTextOnly);
   boxes.forEach((b) => b.addEventListener("change", update));
   $("all").addEventListener("change", () => {
-    boxes.forEach((b) => (b.checked = $("all").checked));
+    boxes.forEach((b) => (b.checked = !b.disabled && $("all").checked));
     update();
   });
   $("download").addEventListener("click", () => {
     const items = boxes
-      .filter((b) => b.checked)
+      .filter((b) => b.checked && !b.disabled)
       .map((b) => {
         const i = Number(b.dataset.index);
         const l = lessons[i];
         return {
           kind: "lesson", lessonId: l.id, title: l.title, number: i + 1,
           section: l.section, sectionNumber: l.sectionNumber, numberInSection: l.numberInSection,
-          source: l.source, videoLink: l.videoLink,
+          source: l.source, videoLink: l.videoLink, textOnly: l.textOnly,
         };
       });
     startJob(tab.id, course, items);
   });
-  update();
+  syncTextOnly();
   return true;
 }
 
@@ -136,11 +183,13 @@ function renderCurrent(tab, videos) {
   $("current").hidden = false;
   const list = $("current-list");
   const title = cleanTitle(tab.title) || "video";
+  // Lección abierta (?md=<id>), para guardar también su texto.
+  const lessonId = new URL(tab.url).searchParams.get("md") || undefined;
   videos.forEach((v, i) => {
     const name = title + (videos.length > 1 ? ` (${i + 1})` : "");
     const btn = el("button", { textContent: "Descargar" });
     btn.addEventListener("click", () =>
-      startJob(tab.id, "", [{ kind: "url", url: v.url, type: v.type, title: name }]));
+      startJob(tab.id, "", [{ kind: "url", url: v.url, type: v.type, title: name, lessonId: i === 0 ? lessonId : undefined }]));
     list.append(el("div", { className: "item" },
       el("div", {}, el("strong", { textContent: name }), el("div", { className: "muted", textContent: `${v.source} · ${v.type.toUpperCase()}` })),
       btn));
