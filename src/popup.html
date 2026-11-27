@@ -30,6 +30,15 @@
     </label>
   </section>
 
+  <section class="extra">
+    <label class="field">Guardar en
+      <input id="dest" type="text" spellcheck="false" autocomplete="off"
+        placeholder="Carpeta de descargas (o pega aquí otra carpeta)" />
+    </label>
+    <p id="dest-hint" class="muted small" hidden></p>
+    <label class="check"><input type="checkbox" id="text" checked /> Guardar también el texto de cada lección</label>
+  </section>
+
   <section id="course" hidden>
     <div class="row">
       <h2 id="course-title">Curso</h2>
@@ -49,6 +58,7 @@
   </section>
 
   <p id="message" class="muted">Buscando videos…</p>
+  <script src="dest.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

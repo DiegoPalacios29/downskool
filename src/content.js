@@ -6,6 +6,7 @@
 //     Las lecciones tienen unitType "module"; los módulos visibles son "set".
 //     metadata.videoId (o videoIds) indica un video nativo de Skool y
 //     metadata.videoLink / videoLinksData un video externo (YouTube, Loom...).
+//     metadata.desc es el texto de la lección y metadata.resources sus adjuntos.
 //   - video: el video nativo de la lección abierta (?md=<id>), con
 //     { id, playbackId, playbackToken, status }. El stream es
 //     https://stream.video.skool.com/<playbackId>.m3u8?token=<playbackToken>
@@ -114,10 +115,10 @@
       visit(tree, "");
     }
 
-    const withVideo = lessons.filter((l) => l.source);
+    // Las lecciones sin video (source null) también se listan: pueden traer texto.
     return {
       course: course || document.title.replace(/\s*[|·-]\s*Skool\s*$/i, ""),
-      lessons: withVideo.length ? withVideo : lessons,
+      lessons,
     };
   }
 
@@ -158,6 +159,25 @@
     };
   }
 
+  // Texto y recursos de la lección, sin procesar (los convierte lessontext.js).
+  function textFrom(data, lessonId) {
+    let meta = null;
+    for (const obj of walk(propsOf(data))) {
+      if (obj.id !== lessonId || !obj.metadata) continue;
+      if (!meta) meta = obj.metadata;
+      if (obj.metadata.desc) {
+        meta = obj.metadata;
+        break;
+      }
+    }
+    meta = meta || {};
+    return {
+      desc: meta.desc || meta.description || "",
+      resources: meta.resources || null,
+      url: lessonUrl(lessonId),
+    };
+  }
+
   function lessonUrl(lessonId) {
     const url = new URL(location.href);
     url.searchParams.set("md", lessonId);
@@ -174,7 +194,7 @@
     }
     if (msg.type === "resolve-lesson") {
       fetchNextData(lessonUrl(msg.lessonId))
-        .then((data) => sendResponse({ ok: true, ...mediaFrom(data, msg.lessonId) }))
+        .then((data) => sendResponse({ ok: true, ...mediaFrom(data, msg.lessonId), text: textFrom(data, msg.lessonId) }))
         .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
       return true;
     }

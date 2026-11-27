@@ -1,6 +1,6 @@
 {
   "name": "downskool",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Extensión de Chrome para descargar los videos de tus cursos de Skool en MP4, MP3, M4A o WAV.",
   "scripts": {
